@@ -16,9 +16,13 @@ VIEW_90D = "v_preco_stats_90d"
 
 
 def get_conn():
-    # Importa o driver só quando precisar (evita quebrar o deploy)
+    """
+    Conexão com MySQL (lazy import):
+    - Não importa mysql.connector no topo (evita quebrar deploy).
+    - Se o driver não estiver instalado, devolve erro claro.
+    """
     try:
-        import mysql.connector
+        import mysql.connector  # lazy import
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -43,6 +47,21 @@ def get_conn():
 def health():
     # Saúde da API: NÃO depende de banco
     return {"ok": True, "service": "miniizi-api"}
+
+
+@app.get("/ip")
+def ip():
+    """
+    Retorna o IP de saída (outbound) do serviço no Render.
+    Usado apenas para o admin liberar o acesso no MySQL.
+    """
+    try:
+        import requests
+
+        ip_txt = requests.get("https://api.ipify.org", timeout=8).text.strip()
+        return {"ip": ip_txt}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro obtendo IP externo: {e}")
 
 
 @app.get("/health/db")
