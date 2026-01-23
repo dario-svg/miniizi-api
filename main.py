@@ -2,7 +2,6 @@ import os
 import re
 from typing import List, Optional
 
-import mysql.connector
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -11,8 +10,21 @@ load_dotenv()
 
 app = FastAPI(title="MiniIzi API")
 
+# Views usadas no MVP
+VIEW_7D = "v_preco_stats_7d"
+VIEW_90D = "v_preco_stats_90d"
+
 
 def get_conn():
+    # Importa o driver só quando precisar (evita quebrar o deploy)
+    try:
+        import mysql.connector
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"MySQL driver ausente. Instale 'mysql-connector-python' no requirements.txt. Detalhe: {e}",
+        )
+
     try:
         return mysql.connector.connect(
             host=os.getenv("DB_HOST"),
@@ -29,13 +41,20 @@ def get_conn():
 
 @app.get("/health")
 def health():
+    # Saúde da API: NÃO depende de banco
+    return {"ok": True, "service": "miniizi-api"}
+
+
+@app.get("/health/db")
+def health_db():
+    # Saúde do banco: testa conexão e SELECT 1
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT 1")
     cur.fetchone()
     cur.close()
     conn.close()
-    return {"ok": True}
+    return {"ok": True, "db": "ok"}
 
 
 @app.get("/debug/views")
@@ -57,15 +76,10 @@ def list_views():
     return {"views": rows}
 
 
-# --- Janela automática por NCM (regra MVP) ---
-VIEW_7D = "v_preco_stats_7d"
-VIEW_90D = "v_preco_stats_90d"
-
-
 def escolhe_view_por_ncm(pr_ncm: Optional[str]) -> str:
     """
     Regra canônica (MVP):
-    - Se NCM (8 dígitos) <= 08000000 => janela 7d (hortifruti/carnes/pescados, por sua regra)
+    - Se NCM (8 dígitos) <= 08000000 => janela 7d
     - Caso contrário => janela 90d
     - Se NCM vazio/ inválido => 90d (fallback seguro)
     """
@@ -74,38 +88,31 @@ def escolhe_view_por_ncm(pr_ncm: Optional[str]) -> str:
 
     digits = re.sub(r"\D", "", str(pr_ncm))
 
-    # NCM padrão tem 8 dígitos; completa com zeros à esquerda se vier curto
     if len(digits) < 8:
         digits = digits.zfill(8)
 
     if len(digits) != 8:
         return VIEW_90D
 
-    n = int(digits)  # ex.: "07019000" -> 7019000
+    n = int(digits)
     return VIEW_7D if n <= 8_000_000 else VIEW_90D
 
 
 class ItemXML(BaseModel):
     pr_nomeProduto: str
     pr_unidade: str
-    pr_ncm: Optional[str] = None  # usado para roteamento 7d/90d
+    pr_ncm: Optional[str] = None
 
 
 class AnalisaRequest(BaseModel):
     itens: List[ItemXML]
-    janela_padrao_dias: int = 30  # reservado p/ futuro (mantido)
+    janela_padrao_dias: int = 30
     limite_fornecedores: int = 5
     n_min: int = 3
 
 
 @app.post("/analisa", tags=["miniizi"])
 def analisa(req: AnalisaRequest):
-    """
-    Recebe lista de itens (nome do XML + unidade) e devolve:
-    - nome normativo provável (via v_mapa_nomeproduto_norm)
-    - top fornecedores (via v_preco_stats_7d ou v_preco_stats_90d, automático por NCM)
-    Com filtro de confiabilidade: n >= n_min
-    """
     conn = get_conn()
     cur = conn.cursor(dictionary=True)
 
@@ -115,10 +122,9 @@ def analisa(req: AnalisaRequest):
         nome_prod = (item.pr_nomeProduto or "").strip()
         unidade = (item.pr_unidade or "").strip()
 
-        # escolhe view automaticamente por NCM
         view_stats = escolhe_view_por_ncm(item.pr_ncm)
 
-        # 1) mapear nome do XML -> nome normativo (pega o mais frequente)
+        # 1) mapear nome do XML -> nome normativo
         cur.execute(
             """
             SELECT pr_nomeNorm, ocorrencias
@@ -144,7 +150,7 @@ def analisa(req: AnalisaRequest):
 
         nome_norm = row_map["pr_nomeNorm"]
 
-        # 2) buscar melhores fornecedores (janela automática 7d/90d) com filtro n >= n_min
+        # 2) buscar melhores fornecedores (7d/90d) com filtro n >= n_min
         cur.execute(
             f"""
             SELECT
