@@ -4,11 +4,21 @@ from typing import List, Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 load_dotenv()
 
 app = FastAPI(title="MiniIzi API")
+
+# ✅ CORS (necessário para o frontend do Lovable chamar a API)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # depois você pode restringir ao domínio do Lovable
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Views usadas no MVP
 VIEW_7D = "v_preco_stats_7d"
@@ -128,6 +138,7 @@ class AnalisaRequest(BaseModel):
     janela_padrao_dias: int = 30
     limite_fornecedores: int = 5
     n_min: int = 3
+
 
 @app.post("/analisa", tags=["miniizi"])
 def analisa(req: AnalisaRequest):
