@@ -134,6 +134,8 @@ def debug_env():
     return {
         "DB_HOST": os.getenv("DB_HOST"),
         "DB_PORT_LIDO": os.getenv("DB_PORT"),
+        "PASS": os.getenv("DB_PASS"),
+        "PASS": os.getenv("DB_USER"),
         "VARIAVEIS_DISPONIVEIS": list(os.environ.keys())
     }
 
