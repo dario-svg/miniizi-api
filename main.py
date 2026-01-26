@@ -14,8 +14,8 @@ app = FastAPI(title="MiniIzi API")
 # ✅ CORS (necessário para o frontend do Lovable chamar a API)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # depois você pode restringir ao domínio do Lovable
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
