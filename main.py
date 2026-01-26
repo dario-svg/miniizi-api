@@ -129,6 +129,14 @@ class AnalisaRequest(BaseModel):
     limite_fornecedores: int = 5
     n_min: int = 3
 
+@app.get("/debug/env")
+def debug_env():
+    return {
+        "DB_HOST": os.getenv("DB_HOST"),
+        "DB_PORT_LIDO": os.getenv("DB_PORT"),
+        "VARIAVEIS_DISPONIVEIS": list(os.environ.keys())
+    }
+
 
 @app.post("/analisa", tags=["miniizi"])
 def analisa(req: AnalisaRequest):
