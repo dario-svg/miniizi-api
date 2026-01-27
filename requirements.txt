@@ -4,3 +4,4 @@ python-dotenv
 mysql-connector-python
 requests
 defusedxml
+python-multipart
