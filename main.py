@@ -40,7 +40,7 @@ def get_conn():
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"MySQL driver ausente. Instale 'mysql-connector-python' no requirements.txt. Detalhe: {e}",
+            detail=f"MySQL driver ausente. Instale 'mysql-connector-python'. Detalhe: {e}",
         )
 
     try:
@@ -57,7 +57,11 @@ def get_conn():
         raise HTTPException(status_code=500, detail=f"Erro conectando no MySQL: {e}")
 
 
-def salva_xml_no_banco(xml_bytes: bytes, filename: Optional[str], content_type: Optional[str]) -> str:
+def salva_xml_no_banco(
+    xml_bytes: bytes,
+    filename: Optional[str],
+    content_type: Optional[str],
+) -> str:
     """
     Salva o XML bruto no MySQL e retorna o hash SHA-256 (dedup).
     Se já existir, não duplica.
@@ -68,7 +72,6 @@ def salva_xml_no_banco(xml_bytes: bytes, filename: Optional[str], content_type: 
     conn = get_conn()
     cur = conn.cursor()
 
-    # INSERT IGNORE: se já existir (mesmo hash), não insere de novo
     cur.execute(
         """
         INSERT IGNORE INTO xml_bruto
@@ -82,21 +85,17 @@ def salva_xml_no_banco(xml_bytes: bytes, filename: Optional[str], content_type: 
     conn.commit()
     cur.close()
     conn.close()
+
     return h
 
 
 @app.get("/health")
 def health():
-    # Saúde da API: NÃO depende de banco
     return {"ok": True, "service": "miniizi-api"}
 
 
 @app.get("/ip")
 def ip():
-    """
-    Retorna o IP de saída (outbound) do serviço no Render.
-    Usado apenas para o admin liberar o acesso no MySQL.
-    """
     try:
         import requests
 
@@ -108,7 +107,6 @@ def ip():
 
 @app.get("/health/db")
 def health_db():
-    # Saúde do banco: testa conexão e SELECT 1
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT 1")
@@ -140,9 +138,9 @@ def list_views():
 def escolhe_view_por_ncm(pr_ncm: Optional[str]) -> str:
     """
     Regra canônica (MVP):
-    - Se NCM (8 dígitos) <= 08000000 => janela 7d
-    - Caso contrário => janela 90d
-    - Se NCM vazio/ inválido => 90d (fallback seguro)
+    - Se NCM (8 dígitos) <= 08000000 => janela curta
+    - Caso contrário => janela longa
+    - Se NCM vazio/ inválido => longa (fallback seguro)
     """
     if not pr_ncm:
         return VIEW_90D
@@ -185,7 +183,6 @@ def analisa(req: AnalisaRequest):
 
         view_stats = escolhe_view_por_ncm(item.pr_ncm)
 
-        # 1) mapear nome do XML -> nome normativo
         cur.execute(
             """
             SELECT pr_nomeNorm, ocorrencias
@@ -211,7 +208,6 @@ def analisa(req: AnalisaRequest):
 
         nome_norm = row_map["pr_nomeNorm"]
 
-        # 2) buscar melhores fornecedores (7d/90d) com filtro n >= n_min
         cur.execute(
             f"""
             SELECT
@@ -262,31 +258,18 @@ def analisa(req: AnalisaRequest):
 
 
 # ----------------------------
-# ✅ Parse de XML real (NF-e / NFC-e)
+# Parse de XML NF-e / NFC-e
 # ----------------------------
 
 def _strip_ns(tag: str) -> str:
-    # "{namespace}tag" -> "tag"
     return tag.split("}", 1)[-1] if "}" in tag else tag
 
 
 def _findall_no_ns(root, wanted: str):
-    out = []
-    for el in root.iter():
-        if _strip_ns(el.tag) == wanted:
-            out.append(el)
-    return out
+    return [el for el in root.iter() if _strip_ns(el.tag) == wanted]
 
 
 def parse_nfe_itens(xml_bytes: bytes) -> List[Dict]:
-    """
-    Extrai itens de XML de NF-e/NFC-e padrão (det/prod).
-    Campos extraídos:
-      - xProd (descrição) -> pr_nomeProduto
-      - uCom (unidade)    -> pr_unidade
-      - NCM               -> pr_ncm
-      - qCom, vUnCom, vProd (opcionais, úteis)
-    """
     try:
         root = ET.fromstring(xml_bytes)
     except Exception as e:
@@ -298,7 +281,7 @@ def parse_nfe_itens(xml_bytes: bytes) -> List[Dict]:
     def to_float(s: Optional[str]) -> Optional[float]:
         if not s:
             return None
-        s = (s or "").strip().replace(",", ".")
+        s = s.strip().replace(",", ".")
         s = re.sub(r"[^0-9.]+", "", s)
         try:
             return float(s) if s else None
@@ -306,7 +289,6 @@ def parse_nfe_itens(xml_bytes: bytes) -> List[Dict]:
             return None
 
     for det in det_nodes:
-        # procura <prod> dentro de <det>
         prod_nodes = [n for n in det.iter() if _strip_ns(n.tag) == "prod"]
         if not prod_nodes:
             continue
@@ -322,26 +304,19 @@ def parse_nfe_itens(xml_bytes: bytes) -> List[Dict]:
         ucom = get_text("uCom") or ""
         ncm = get_text("NCM") or ""
 
-        qcom = to_float(get_text("qCom"))
-        vun = to_float(get_text("vUnCom"))
-        vprod = to_float(get_text("vProd"))
-
         if xprod:
             itens.append(
                 {
                     "pr_nomeProduto": xprod,
                     "pr_unidade": ucom,
                     "pr_ncm": ncm,
-                    "qtd": qcom,
-                    "vl_unit": vun,
-                    "vl_total": vprod,
                 }
             )
 
     if not itens:
         raise HTTPException(
             status_code=422,
-            detail="Não encontrei itens no XML (esperado estrutura NF-e: det/prod/xProd).",
+            detail="Não encontrei itens no XML (estrutura NF-e esperada).",
         )
 
     return itens
@@ -355,15 +330,24 @@ async def analisa_xml(
 ):
     """
     Pipeline 1:
-    - Recebe XML real (upload)
+    - Recebe XML real
+    - Salva XML bruto no MySQL (dedup por hash)
     - Extrai itens do XML
-    - Devolve itens_extraidos para validar o parsing
+    - Retorna itens_extraidos + hash_xml
     """
     xml_bytes = await xml.read()
+
+    hash_xml = salva_xml_no_banco(
+        xml_bytes=xml_bytes,
+        filename=getattr(xml, "filename", None),
+        content_type=getattr(xml, "content_type", None),
+    )
+
     itens = parse_nfe_itens(xml_bytes)
 
     return {
         "ok": True,
+        "hash_xml": hash_xml,
         "limite_fornecedores": limite_fornecedores,
         "n_min": n_min,
         "count": len(itens),
@@ -377,13 +361,6 @@ async def analisa_xml_full(
     limite_fornecedores: int = 5,
     n_min: int = 3,
 ):
-    """
-    Pipeline 2:
-    - Recebe XML real (upload)
-    - Extrai itens do XML
-    - Reaproveita a lógica do /analisa (MySQL + views 7d/90d)
-    - Retorna no mesmo formato do /analisa: {"itens": [...]}
-    """
     xml_bytes = await xml.read()
     itens_extraidos = parse_nfe_itens(xml_bytes)
 
@@ -399,7 +376,7 @@ async def analisa_xml_full(
         ],
         limite_fornecedores=limite_fornecedores,
         n_min=n_min,
-        janela_padrao_dias=30,  # compatibilidade (não usado no MVP)
+        janela_padrao_dias=30,
     )
 
     return analisa(req)
