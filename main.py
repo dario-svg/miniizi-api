@@ -1,5 +1,6 @@
 import os
 import re
+import hashlib
 from typing import List, Optional, Dict
 
 from dotenv import load_dotenv
@@ -54,6 +55,34 @@ def get_conn():
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro conectando no MySQL: {e}")
+
+
+def salva_xml_no_banco(xml_bytes: bytes, filename: Optional[str], content_type: Optional[str]) -> str:
+    """
+    Salva o XML bruto no MySQL e retorna o hash SHA-256 (dedup).
+    Se já existir, não duplica.
+    Requer tabela: xml_bruto (hash_sha256 UNIQUE).
+    """
+    h = hashlib.sha256(xml_bytes).hexdigest()
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # INSERT IGNORE: se já existir (mesmo hash), não insere de novo
+    cur.execute(
+        """
+        INSERT IGNORE INTO xml_bruto
+          (hash_sha256, filename, content_type, tamanho_bytes, xml_blob)
+        VALUES
+          (%s, %s, %s, %s, %s)
+        """,
+        (h, filename, content_type, len(xml_bytes), xml_bytes),
+    )
+
+    conn.commit()
+    cur.close()
+    conn.close()
+    return h
 
 
 @app.get("/health")
