@@ -233,7 +233,7 @@ def analisa(req: AnalisaRequest):
 
 
 # ----------------------------
-# ✅ NOVO: Parse de XML real (NF-e / NFC-e)
+# ✅ Parse de XML real (NF-e / NFC-e)
 # ----------------------------
 
 def _strip_ns(tag: str) -> str:
@@ -325,11 +325,10 @@ async def analisa_xml(
     n_min: int = 3,
 ):
     """
-    Pipeline 1 (TAREFA J):
+    Pipeline 1:
     - Recebe XML real (upload)
     - Extrai itens do XML
     - Devolve itens_extraidos para validar o parsing
-    Próxima etapa (TAREFA K/L): plugar esses itens no /analisa (consulta MySQL).
     """
     xml_bytes = await xml.read()
     itens = parse_nfe_itens(xml_bytes)
@@ -341,3 +340,37 @@ async def analisa_xml(
         "count": len(itens),
         "itens_extraidos": itens,
     }
+
+
+@app.post("/analisa_xml_full", tags=["miniizi"])
+async def analisa_xml_full(
+    xml: UploadFile = File(...),
+    limite_fornecedores: int = 5,
+    n_min: int = 3,
+):
+    """
+    Pipeline 2:
+    - Recebe XML real (upload)
+    - Extrai itens do XML
+    - Reaproveita a lógica do /analisa (MySQL + views 7d/90d)
+    - Retorna no mesmo formato do /analisa: {"itens": [...]}
+    """
+    xml_bytes = await xml.read()
+    itens_extraidos = parse_nfe_itens(xml_bytes)
+
+    req = AnalisaRequest(
+        itens=[
+            ItemXML(
+                pr_nomeProduto=(it.get("pr_nomeProduto") or "").strip(),
+                pr_unidade=(it.get("pr_unidade") or "").strip(),
+                pr_ncm=(it.get("pr_ncm") or None),
+            )
+            for it in itens_extraidos
+            if (it.get("pr_nomeProduto") or "").strip()
+        ],
+        limite_fornecedores=limite_fornecedores,
+        n_min=n_min,
+        janela_padrao_dias=30,  # compatibilidade (não usado no MVP)
+    )
+
+    return analisa(req)
