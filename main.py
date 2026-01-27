@@ -278,16 +278,6 @@ def parse_nfe_itens(xml_bytes: bytes) -> List[Dict]:
     det_nodes = _findall_no_ns(root, "det")
     itens: List[Dict] = []
 
-    def to_float(s: Optional[str]) -> Optional[float]:
-        if not s:
-            return None
-        s = s.strip().replace(",", ".")
-        s = re.sub(r"[^0-9.]+", "", s)
-        try:
-            return float(s) if s else None
-        except Exception:
-            return None
-
     for det in det_nodes:
         prod_nodes = [n for n in det.iter() if _strip_ns(n.tag) == "prod"]
         if not prod_nodes:
@@ -361,7 +351,23 @@ async def analisa_xml_full(
     limite_fornecedores: int = 5,
     n_min: int = 3,
 ):
+    """
+    Pipeline 2:
+    - Recebe XML real
+    - Salva XML bruto no MySQL (dedup por hash)
+    - Extrai itens do XML
+    - Roda a análise completa (MySQL + views 7d/90d)
+    - Retorna {"itens": [...]} + hash_xml
+    """
     xml_bytes = await xml.read()
+
+    # ✅ NOVO (Tarefa 4): salvar também no full
+    hash_xml = salva_xml_no_banco(
+        xml_bytes=xml_bytes,
+        filename=getattr(xml, "filename", None),
+        content_type=getattr(xml, "content_type", None),
+    )
+
     itens_extraidos = parse_nfe_itens(xml_bytes)
 
     req = AnalisaRequest(
@@ -379,4 +385,6 @@ async def analisa_xml_full(
         janela_padrao_dias=30,
     )
 
-    return analisa(req)
+    out = analisa(req)
+    out["hash_xml"] = hash_xml
+    return out
