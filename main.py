@@ -1,11 +1,14 @@
 import os
 import re
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+# XML seguro (recomendado)
+from defusedxml import ElementTree as ET
 
 load_dotenv()
 
@@ -227,3 +230,114 @@ def analisa(req: AnalisaRequest):
     cur.close()
     conn.close()
     return {"itens": resultados}
+
+
+# ----------------------------
+# ✅ NOVO: Parse de XML real (NF-e / NFC-e)
+# ----------------------------
+
+def _strip_ns(tag: str) -> str:
+    # "{namespace}tag" -> "tag"
+    return tag.split("}", 1)[-1] if "}" in tag else tag
+
+
+def _findall_no_ns(root, wanted: str):
+    out = []
+    for el in root.iter():
+        if _strip_ns(el.tag) == wanted:
+            out.append(el)
+    return out
+
+
+def parse_nfe_itens(xml_bytes: bytes) -> List[Dict]:
+    """
+    Extrai itens de XML de NF-e/NFC-e padrão (det/prod).
+    Campos extraídos:
+      - xProd (descrição) -> pr_nomeProduto
+      - uCom (unidade)    -> pr_unidade
+      - NCM               -> pr_ncm
+      - qCom, vUnCom, vProd (opcionais, úteis)
+    """
+    try:
+        root = ET.fromstring(xml_bytes)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"XML inválido: {e}")
+
+    det_nodes = _findall_no_ns(root, "det")
+    itens: List[Dict] = []
+
+    def to_float(s: Optional[str]) -> Optional[float]:
+        if not s:
+            return None
+        s = (s or "").strip().replace(",", ".")
+        s = re.sub(r"[^0-9.]+", "", s)
+        try:
+            return float(s) if s else None
+        except Exception:
+            return None
+
+    for det in det_nodes:
+        # procura <prod> dentro de <det>
+        prod_nodes = [n for n in det.iter() if _strip_ns(n.tag) == "prod"]
+        if not prod_nodes:
+            continue
+        prod = prod_nodes[0]
+
+        def get_text(tagname: str) -> Optional[str]:
+            for n in prod.iter():
+                if _strip_ns(n.tag) == tagname:
+                    return (n.text or "").strip()
+            return None
+
+        xprod = get_text("xProd") or ""
+        ucom = get_text("uCom") or ""
+        ncm = get_text("NCM") or ""
+
+        qcom = to_float(get_text("qCom"))
+        vun = to_float(get_text("vUnCom"))
+        vprod = to_float(get_text("vProd"))
+
+        if xprod:
+            itens.append(
+                {
+                    "pr_nomeProduto": xprod,
+                    "pr_unidade": ucom,
+                    "pr_ncm": ncm,
+                    "qtd": qcom,
+                    "vl_unit": vun,
+                    "vl_total": vprod,
+                }
+            )
+
+    if not itens:
+        raise HTTPException(
+            status_code=422,
+            detail="Não encontrei itens no XML (esperado estrutura NF-e: det/prod/xProd).",
+        )
+
+    return itens
+
+
+@app.post("/analisa_xml", tags=["miniizi"])
+async def analisa_xml(
+    xml: UploadFile = File(...),
+    limite_fornecedores: int = 5,
+    n_min: int = 3,
+):
+    """
+    Pipeline 1 (TAREFA J):
+    - Recebe XML real (upload)
+    - Extrai itens do XML
+    - Devolve itens_extraidos para validar o parsing
+    Próxima etapa (TAREFA K/L): plugar esses itens no /analisa (consulta MySQL).
+    """
+    xml_bytes = await xml.read()
+    itens = parse_nfe_itens(xml_bytes)
+
+    return {
+        "ok": True,
+        "limite_fornecedores": limite_fornecedores,
+        "n_min": n_min,
+        "count": len(itens),
+        "itens_extraidos": itens,
+    }
